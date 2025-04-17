@@ -7,47 +7,6 @@ from types import SimpleNamespace
 from crm.fcrm.doctype.crm_lead.api import get_lead
 from crm.fcrm.doctype.crm_lead.crm_lead import CRMLead, convert_to_deal
 
-# # ==============================
-# # Unit tests cho API get_lead
-# # ==============================
-# class TestCRMLeadAPI(UnitTestCase):
-
-#     def test_get_lead_success_TC_LEAD_API_001(self):
-#         """
-#         TC_LEAD_API_001: get_lead trả về dict bao gồm fields_meta, _form_script và _assign
-#         """
-#         # 1. Tạo fake_doc có .name và .as_dict()
-#         fake_doc = SimpleNamespace(
-#             name='LEAD-1',
-#             as_dict=lambda: frappe._dict({'name': 'LEAD-1'})
-#         )
-
-#         # 2. Patch các hàm dependency trong api module
-#         with patch('crm.fcrm.doctype.crm_lead.api.frappe.get_doc', return_value=fake_doc), \
-#              patch('crm.fcrm.doctype.crm_lead.api.get_fields_meta', return_value={'meta': 'fields'}), \
-#              patch('crm.fcrm.doctype.crm_lead.api.get_form_script', return_value='script'), \
-#              patch('crm.fcrm.doctype.crm_lead.api.get_assigned_users', return_value=['u1', 'u2']):
-            
-#             result = get_lead('LEAD-1')
-
-#         # 3. Kiểm tra kết quả
-#         self.assertIsInstance(result, dict)
-#         self.assertEqual(result['fields_meta'], {'meta': 'fields'})
-#         self.assertEqual(result['_form_script'], 'script')
-#         self.assertEqual(result['_assign'], ['u1', 'u2'])
-
-#     def test_get_lead_permission_error_TC_LEAD_API_002(self):
-#         """
-#         TC_LEAD_API_002: get_lead phải báo lỗi PermissionError khi thiếu quyền đọc
-#         """
-#         fake_doc = MagicMock()
-#         fake_doc.check_permission.side_effect = PermissionError
-
-#         with patch('crm.fcrm.doctype.crm_lead.api.frappe.get_doc', return_value=fake_doc):
-#             with self.assertRaises(PermissionError):
-#                 get_lead('LEAD-2')
-
-
 # ==============================
 # Unit tests cho model CRMLead
 # ==============================
