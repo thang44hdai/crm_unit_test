@@ -1,42 +1,43 @@
+from types import SimpleNamespace
+import uuid
 import frappe
 import unittest
-import uuid
-from frappe.tests.utils import FrappeTestCase
-from frappe.exceptions import PermissionError, DoesNotExistError, LinkValidationError
-from unittest.mock import patch
-from crm.api.activity import create_deal
+from frappe.exceptions import DoesNotExistError, LinkValidationError, PermissionError
+from crm.fcrm.doctype.crm_deal.api import (
+    get_deal_contacts, get_deal,
+)
+from unittest.mock import MagicMock, patch
 from crm.fcrm.doctype.crm_deal.crm_deal import (
-    create_contact, add_contact, remove_contact, set_primary_contact, contact_exists
+    create_deal, add_contact, 
+    remove_contact, set_primary_contact,
+    create_contact, contact_exists,
+    create_organization
 )
 
-# Kiểm thử chức năng tạo Deal trong CRM
-class TestCreateDealFunction(unittest.TestCase):
-
-    # Thiết lập môi trường trước mỗi bài kiểm thử
+class TestCreateDealWithExistingContactAndOrganization(unittest.TestCase):
     def setUp(self):
-        frappe.set_user("Administrator")  # Đảm bảo rằng người dùng là Admin để có quyền tạo tài liệu
-        self.organization_name = f"Test Org {uuid.uuid4()}"  # Tạo tên tổ chức ngẫu nhiên
+        frappe.set_user("Administrator")
+        self.organization_name = f"Test Org {uuid.uuid4()}"
         self.organization = frappe.get_doc({
-            "doctype": "CRM Organization",  # Tạo tổ chức CRM mới
+            "doctype": "CRM Organization",
             "organization_name": self.organization_name,
             "no_of_employees": "1-10"
         }).insert(ignore_permissions=True)
 
-        self.contact_email = f"alice_{uuid.uuid4().hex[:6]}@example.com"  # Tạo email ngẫu nhiên cho contact
+        self.contact_email = f"alice_{uuid.uuid4().hex[:6]}@example.com"
         self.contact = frappe.get_doc({
-            "doctype": "Contact",  # Tạo liên hệ mới
+            "doctype": "Contact",
             "first_name": "Alice",
             "last_name": "Nguyen",
             "email_id": self.contact_email,
             "mobile_no": "0123456789"
         }).insert(ignore_permissions=True)
 
-    # Quay lại trạng thái ban đầu sau mỗi bài kiểm thử
     def tearDown(self):
         frappe.db.rollback()
 
-    # Kiểm thử việc tạo Deal với tổ chức và liên hệ đã tồn tại
-    def test_create_deal_with_existing_contact_and_organization(self):
+    # Nhiệm vụ: Kiểm tra tạo deal với contact và organization đã tồn tại
+    def test_create_deal_01(self):
         deal_data = {
             "deal_name": f"Test Deal {uuid.uuid4()}",
             "deal_value": 10000,
@@ -45,17 +46,15 @@ class TestCreateDealFunction(unittest.TestCase):
             "contact": self.contact.name,
         }
 
-        deal_name = create_deal(deal_data)  # Gọi hàm tạo Deal
+        deal_name = create_deal(deal_data)
 
-        self.assertTrue(frappe.db.exists("CRM Deal", deal_name))  # Kiểm tra Deal có tồn tại trong cơ sở dữ liệu
+        self.assertTrue(frappe.db.exists("CRM Deal", deal_name))
+
         deal_doc = frappe.get_doc("CRM Deal", deal_name)
-        self.assertEqual(deal_doc.organization, self.organization.name)  # Kiểm tra tổ chức của Deal
-        self.assertEqual(deal_doc.contacts[0].contact, self.contact.name)  # Kiểm tra liên hệ trong Deal
+        self.assertEqual(deal_doc.organization, self.organization.name)
+        self.assertEqual(deal_doc.contacts[0].contact, self.contact.name)
 
-
-# Kiểm thử tạo Deal khi không có tổ chức và liên hệ
 class TestCreateDealWithoutOrgAndContact(unittest.TestCase):
-
     def setUp(self):
         frappe.set_user("Administrator")
         self.deal_data = {
@@ -73,143 +72,59 @@ class TestCreateDealWithoutOrgAndContact(unittest.TestCase):
     def tearDown(self):
         frappe.db.rollback()
 
-    def test_create_deal_without_org_and_contact(self):
-        deal_name = create_deal(self.deal_data)  # Gọi hàm tạo Deal
+    # Nhiệm vụ: Kiểm tra tạo deal khi chưa có sẵn contact và organization
+    def test_create_deal_02(self):
+        deal_name = create_deal(self.deal_data)
         deal_doc = frappe.get_doc("CRM Deal", deal_name)
 
-        self.assertTrue(frappe.db.exists("CRM Deal", deal_name))  # Kiểm tra Deal đã được tạo
-        self.assertTrue(frappe.db.exists("CRM Organization", deal_doc.organization))  # Kiểm tra tổ chức đã được tạo
-        self.assertGreater(len(deal_doc.contacts), 0)  # Kiểm tra có ít nhất một liên hệ trong Deal
+        self.assertTrue(frappe.db.exists("CRM Deal", deal_name))
 
-        contact = frappe.get_doc("Contact", deal_doc.contacts[0].contact)  # Lấy thông tin liên hệ
-        self.assertEqual(contact.email_id, self.deal_data["email"])  # Kiểm tra email liên hệ
-        self.assertEqual(contact.mobile_no, self.deal_data["mobile_no"])  # Kiểm tra số điện thoại liên hệ
+        self.assertTrue(frappe.db.exists("CRM Organization", deal_doc.organization))
+        self.assertGreater(len(deal_doc.contacts), 0)
 
+        contact = frappe.get_doc("Contact", deal_doc.contacts[0].contact)
+        self.assertEqual(contact.email_id, self.deal_data["email"])
+        self.assertEqual(contact.mobile_no, self.deal_data["mobile_no"])
 
-# Kiểm thử tạo Deal chỉ với liên hệ, không có tổ chức
-class TestCreateDealWithoutOrganization(FrappeTestCase):
-    def test_create_deal_with_contact_only(self):
-        args = {
-            "title": "Deal With Contact Only",
-            "first_name": "NoOrg",
-            "last_name": "User",
-            "email": "noorguser@example.com",
-            "mobile_no": "0987654321"
-        }
-
-        deal_name = create_deal(args)  # Gọi hàm tạo Deal
-        deal = frappe.get_doc("CRM Deal", deal_name)
-
-        self.assertFalse(deal.organization)  # Kiểm tra rằng Deal không có tổ chức
-        self.assertGreater(len(deal.contacts), 0)  # Kiểm tra có ít nhất một liên hệ trong Deal
-
-        contact = frappe.get_doc("Contact", deal.contacts[0].contact)  # Lấy thông tin liên hệ
-        self.assertEqual(contact.first_name, "NoOrg")  # Kiểm tra tên liên hệ
-        self.assertEqual(contact.email_ids[0].email_id, "noorguser@example.com")  # Kiểm tra email liên hệ
-
-
-# Kiểm thử tạo Contact với các trường hợp khác nhau
-class TestCreateContact(unittest.TestCase):
-
-    # Kiểm thử tạo Contact với tất cả các trường
-    def test_create_contact_with_all_fields(self):
-        doc = {
-            "first_name": "John",
-            "last_name": "Doe",
-            "salutation": "Mr",
-            "organization": "TechCorp",
-            "email": "john.doe@techcorp.com",
-            "mobile_no": "1234567890"
-        }
-
-        contact_name = create_contact(doc)  # Gọi hàm tạo Contact
-        contact = frappe.get_doc("Contact", contact_name)
-
-        self.assertEqual(contact.first_name, "John")  # Kiểm tra tên đầu tiên
-        self.assertEqual(contact.last_name, "Doe")  # Kiểm tra họ
-        self.assertEqual(contact.company_name, "TechCorp")  # Kiểm tra tên công ty
-        self.assertEqual(contact.email_ids[0].email_id, "john.doe@techcorp.com")  # Kiểm tra email
-        self.assertEqual(contact.phone_nos[0].phone, "1234567890")  # Kiểm tra số điện thoại
-
-    # Kiểm thử tạo Contact khi thiếu email và số điện thoại
-    def test_create_contact_with_missing_email_and_phone(self):
-        doc = {
-            "first_name": "Jane",
-            "last_name": "Smith",
-            "organization": "AnotherCorp"
-        }
-
-        contact_name = create_contact(doc)  # Gọi hàm tạo Contact
-        contact = frappe.get_doc("Contact", contact_name)
-
-        self.assertEqual(contact.first_name, "Jane")  # Kiểm tra tên đầu tiên
-        self.assertEqual(contact.last_name, "Smith")  # Kiểm tra họ
-        self.assertEqual(len(contact.email_ids), 0)  # Kiểm tra không có email
-        self.assertEqual(len(contact.phone_nos), 0)  # Kiểm tra không có số điện thoại
-
-    # Kiểm thử tạo Contact với liên hệ đã tồn tại
-    def test_create_contact_with_existing_contact(self):
-        doc = {
-            "first_name": "John",
-            "last_name": "Doe",
-            "email": "john.doe@techcorp.com",
-            "mobile_no": "1234567890"
-        }
-
-        create_contact(doc)  # Tạo liên hệ ban đầu
-        contact_name = create_contact(doc)  # Tạo liên hệ trùng
-
-        self.assertEqual(contact_name, doc["email"])  # Kiểm tra rằng tên liên hệ bằng email (giả sử tên = email)
-
-    # Kiểm thử tạo Contact với dữ liệu không hợp lệ
-    def test_create_contact_with_invalid_data(self):
-        doc = {"first_name": None, "last_name": None}  # Dữ liệu thiếu
-        with self.assertRaises(frappe.ValidationError):  # Kiểm tra ngoại lệ ValidationError
-            create_contact(doc)
-
-
-# Kiểm thử thêm liên hệ vào Deal
 class TestAddContact(unittest.TestCase):
-    # Thiết lập môi trường kiểm thử
+
     def setUp(self):
         frappe.set_user("Administrator")
         self.contact = frappe.get_doc({"doctype": "Contact", "first_name": "Test"}).insert(ignore_permissions=True)
         self.deal = frappe.get_doc({"doctype": "CRM Deal", "deal_name": "Test Deal"}).insert(ignore_permissions=True)
 
-    # Quay lại trạng thái ban đầu sau bài kiểm thử
     def tearDown(self):
         frappe.delete_doc("CRM Deal", self.deal.name, force=True)
         frappe.delete_doc("Contact", self.contact.name, force=True)
 
-    # Kiểm thử thêm liên hệ vào Deal thành công
-    def test_add_contact_success(self):
-        result = add_contact(self.deal.name, self.contact.name)  # Gọi hàm thêm liên hệ
-        updated = frappe.get_doc("CRM Deal", self.deal.name)  # Lấy thông tin Deal đã cập nhật
+    # Nhiệm vụ: Kiểm tra thêm contact vào deal
+    def test_add_contact_01(self):
+        result = add_contact(self.deal.name, self.contact.name)
+        updated = frappe.get_doc("CRM Deal", self.deal.name)
         contact_names = [c.contact for c in updated.contacts]
-        self.assertTrue(result)  # Kiểm tra hàm trả về True
-        self.assertIn(self.contact.name, contact_names)  # Kiểm tra liên hệ đã được thêm vào Deal
 
-    # Kiểm thử khi không có quyền thêm liên hệ
-    def test_add_contact_no_permission(self):
-        with patch("frappe.has_permission", return_value=False):  # Giả lập không có quyền
-            with self.assertRaises(PermissionError):  # Kiểm tra ngoại lệ PermissionError
+        self.assertTrue(result)
+        self.assertIn(self.contact.name, contact_names)
+
+    # Nhiệm vụ: Kiểm tra quyền truy cập khi thêm contact vào deal
+    def test_add_contact_04(self):
+        with patch("frappe.has_permission", return_value=False):
+            with self.assertRaises(PermissionError):  
                 add_contact(self.deal.name, self.contact.name)
 
-    # Kiểm thử khi Deal không tồn tại
-    def test_add_contact_deal_not_found(self):
-        with self.assertRaises(DoesNotExistError):  # Kiểm tra ngoại lệ DoesNotExistError
+    # Nhiệm vụ: Kiểm tra xử lý khi thêm contact vào deal không tồn tại
+    def test_add_contact_02(self):
+        with self.assertRaises(DoesNotExistError): 
             add_contact("Nonexistent Deal", self.contact.name)
 
-    # Kiểm thử khi liên hệ không tồn tại
-    def test_add_contact_contact_not_found(self):
-        with self.assertRaises(LinkValidationError):  # Kiểm tra ngoại lệ LinkValidationError
+    # Nhiệm vụ: Kiểm tra xử lý khi thêm contact không tồn tại vào deal
+    def test_add_contact_03(self):
+        with self.assertRaises(LinkValidationError):  
             add_contact(self.deal.name, "Nonexistent Contact")
-
 
 class TestRemoveContact(unittest.TestCase):
     def setUp(self):
         frappe.set_user("Administrator")
-        # Tạo mới contact và deal
         self.contact = frappe.get_doc({"doctype": "Contact", "first_name": "Jane"}).insert(ignore_permissions=True)
         self.deal = frappe.get_doc({
             "doctype": "CRM Deal",
@@ -218,30 +133,29 @@ class TestRemoveContact(unittest.TestCase):
         }).insert(ignore_permissions=True)
 
     def tearDown(self):
-        # Xóa các đối tượng đã tạo sau khi kiểm thử
         frappe.delete_doc("CRM Deal", self.deal.name, force=True)
         frappe.delete_doc("Contact", self.contact.name, force=True)
 
-    def test_remove_contact_success(self):
-        # Kiểm tra thành công khi xóa contact khỏi deal
+    # Nhiệm vụ: Kiểm tra xóa contact khỏi deal
+    def test_remove_contact_01(self):
         result = remove_contact(self.deal.name, self.contact.name)
         updated = frappe.get_doc("CRM Deal", self.deal.name)
         self.assertTrue(result)
         self.assertNotIn(self.contact.name, [c.contact for c in updated.contacts])
 
-    def test_remove_contact_no_permission(self):
-        # Kiểm tra trường hợp không có quyền khi xóa contact
+    # Nhiệm vụ: Kiểm tra quyền truy cập khi xóa contact khỏi deal
+    def test_remove_contact_04(self):
         with patch("frappe.has_permission", return_value=False):
             with self.assertRaises(PermissionError):
                 remove_contact(self.deal.name, self.contact.name)
 
-    def test_remove_contact_deal_not_found(self):
-        # Kiểm tra trường hợp deal không tồn tại
+    # Nhiệm vụ: Kiểm tra xử lý khi xóa contact khỏi deal không tồn tại
+    def test_remove_contact_02(self):
         with self.assertRaises(DoesNotExistError):
             remove_contact("Nonexistent Deal", self.contact.name)
 
-    def test_remove_contact_not_in_list(self):
-        # Kiểm tra trường hợp contact không có trong danh sách của deal
+    # Nhiệm vụ: Kiểm tra xử lý khi xóa contact không có trong danh sách contacts của deal
+    def test_remove_contact_03(self):
         another_deal = frappe.get_doc({"doctype": "CRM Deal", "deal_name": "No Contact Deal"}).insert(ignore_permissions=True)
         try:
             result = remove_contact(another_deal.name, self.contact.name)
@@ -252,7 +166,6 @@ class TestRemoveContact(unittest.TestCase):
 class TestSetPrimaryContact(unittest.TestCase):
     def setUp(self):
         frappe.set_user("Administrator")
-        # Tạo mới contact và deal
         self.contact = frappe.get_doc({"doctype": "Contact", "first_name": "Primary"}).insert(ignore_permissions=True)
         self.other_contact = frappe.get_doc({"doctype": "Contact", "first_name": "Other"}).insert(ignore_permissions=True)
         self.deal = frappe.get_doc({
@@ -265,13 +178,12 @@ class TestSetPrimaryContact(unittest.TestCase):
         }).insert(ignore_permissions=True)
 
     def tearDown(self):
-        # Xóa các đối tượng đã tạo sau khi kiểm thử
         frappe.delete_doc("CRM Deal", self.deal.name, force=True)
         frappe.delete_doc("Contact", self.contact.name, force=True)
         frappe.delete_doc("Contact", self.other_contact.name, force=True)
 
-    def test_set_primary_contact_success(self):
-        # Kiểm tra thành công khi set primary contact
+    # Nhiệm vụ: Kiểm tra thiết lập contact chính cho deal
+    def test_set_primary_contact_01(self):
         result = set_primary_contact(self.deal.name, self.contact.name)
         updated = frappe.get_doc("CRM Deal", self.deal.name)
         self.assertTrue(result)
@@ -281,19 +193,19 @@ class TestSetPrimaryContact(unittest.TestCase):
             else:
                 self.assertNotEqual(c.is_primary, 1)
 
-    def test_set_primary_contact_no_permission(self):
-        # Kiểm tra trường hợp không có quyền khi set primary contact
+    # Nhiệm vụ: Kiểm tra quyền truy cập khi thiết lập contact chính cho deal
+    def test_set_primary_contact_04(self):
         with patch("frappe.has_permission", return_value=False):
             with self.assertRaises(PermissionError):
                 set_primary_contact(self.deal.name, self.contact.name)
 
-    def test_set_primary_contact_deal_not_found(self):
-        # Kiểm tra trường hợp deal không tồn tại
+    # Nhiệm vụ: Kiểm tra xử lý khi thiết lập contact chính cho deal không tồn tại
+    def test_set_primary_contact_02(self):
         with self.assertRaises(DoesNotExistError):
             set_primary_contact("InvalidDeal", self.contact.name)
 
-    def test_set_primary_contact_contact_not_in_list(self):
-        # Kiểm tra trường hợp contact không có trong danh sách của deal
+    # Nhiệm vụ: Kiểm tra xử lý khi thiết lập contact chính cho deal với contact không có trong danh sách
+    def test_set_primary_contact_03(self):
         outside_contact = frappe.get_doc({"doctype": "Contact", "first_name": "Outside"}).insert(ignore_permissions=True)
         try:
             with self.assertRaises(Exception):
@@ -301,31 +213,379 @@ class TestSetPrimaryContact(unittest.TestCase):
         finally:
             frappe.delete_doc("Contact", outside_contact.name, force=True)
 
+class TestGetDeal(unittest.TestCase):
+    def setUp(self):
+        frappe.set_user("Administrator")
+        self.deal = frappe.get_doc({
+            "doctype": "CRM Deal",
+            "deal_name": "Test Deal"
+        }).insert(ignore_permissions=True)
+
+    def tearDown(self):
+        frappe.delete_doc("CRM Deal", self.deal.name, force=True)
+
+    # Nhiệm vụ: Kiểm tra lấy thông tin của deal
+    def test_get_deal_01(self):
+        result = get_deal(self.deal.name)
+
+        self.assertEqual(result["name"], self.deal.name)
+        self.assertIn("fields_meta", result)
+        self.assertIn("_form_script", result)
+        self.assertIn("_assign", result)
+
+    # Nhiệm vụ: Kiểm tra xử lý khi lấy thông tin deal không tồn tại
+    def test_get_deal_02(self):
+        with self.assertRaises(frappe.DoesNotExistError):
+            get_deal("Nonexistent Deal")
+
+class TestGetDealContacts(unittest.TestCase):
+    def setUp(self):
+        frappe.set_user("Administrator")
+        self.contact = frappe.get_doc({
+            "doctype": "Contact",
+            "first_name": "Contact A",
+            "email_ids": [{"email_id": "contacta@example.com", "is_primary": 1}],
+            "phone_nos": [{"phone": "0123456789", "is_primary": 1}],
+        }).insert(ignore_permissions=True)
+
+        self.deal = frappe.get_doc({
+            "doctype": "CRM Deal",
+            "deal_name": f"Deal_{uuid.uuid4().hex[:6]}",
+            "contacts": [{"contact": self.contact.name, "is_primary": 1}]
+        }).insert(ignore_permissions=True)
+
+    def tearDown(self):
+        frappe.delete_doc("CRM Deal", self.deal.name, force=True)
+        frappe.delete_doc("Contact", self.contact.name, force=True)
+
+    # Nhiệm vụ: Kiểm tra lấy danh sách contacts của deal
+    def test_get_deal_contacts_01(self):
+        contacts = get_deal_contacts(self.deal.name)
+
+        self.assertEqual(len(contacts), 1)
+        self.assertEqual(contacts[0]["name"], self.contact.name)  
+        self.assertEqual(contacts[0]["email"], "contacta@example.com")
+        self.assertEqual(contacts[0]["mobile_no"], "0123456789")
+
+    # Nhiệm vụ: Kiểm tra lấy danh sách contacts của deal không có contact nào
+    def test_get_deal_contacts_02(self):
+        empty_deal = frappe.get_doc({
+            "doctype": "CRM Deal",
+            "deal_name": f"Empty_{uuid.uuid4().hex[:6]}"
+        }).insert(ignore_permissions=True)
+
+        try:
+            contacts = get_deal_contacts(empty_deal.name)
+
+            self.assertEqual(contacts, [])
+        finally:
+            frappe.delete_doc("CRM Deal", empty_deal.name, force=True)
+
+    # Nhiệm vụ: Kiểm tra xử lý khi lấy danh sách contacts của deal không tồn tại
+    def test_get_deal_contacts_03(self):
+        with self.assertRaises(frappe.DoesNotExistError):
+            get_deal_contacts("Invalid Deal Name")
+
 class TestContactExists(unittest.TestCase):
+
+    # Nhiệm vụ: Kiểm tra tìm kiếm contact bằng email
     @patch("frappe.db.get_value")
     @patch("frappe.db.exists")
-    def test_contact_exists_with_email(self, mock_exists, mock_get_value):
-        # Kiểm tra khi tìm kiếm contact qua email
-        doc = {"email": "test@example.com", "mobile_no": "123456789"}
-        mock_exists.side_effect = ["contact_email_name", None]
-        mock_get_value.return_value = "Parent Contact A"
-        result = contact_exists(doc)
-        self.assertEqual(result, "Parent Contact A")
+    def test_contact_exists_01(self, mock_exists, mock_get_value):
+        doc = {
+            "email": "john.doe@example.com",
+            "mobile_no": None
+        }
+        mock_exists.return_value = True
+        mock_get_value.return_value = "CONT0001"
 
+        result = contact_exists(doc) 
+        self.assertTrue(result)
+        mock_exists.assert_called_once_with(
+            "Contact Email", 
+            {"email_id": doc["email"]}
+        )
+
+    # Nhiệm vụ: Kiểm tra tìm kiếm contact bằng số điện thoại
     @patch("frappe.db.get_value")
     @patch("frappe.db.exists")
-    def test_contact_exists_with_phone(self, mock_exists, mock_get_value):
-        # Kiểm tra khi tìm kiếm contact qua số điện thoại
-        doc = {"email": "test@example.com", "mobile_no": "123456789"}
-        mock_exists.side_effect = [None, "contact_phone_name"]
-        mock_get_value.return_value = "Parent Contact B"
-        result = contact_exists(doc)
-        self.assertEqual(result, "Parent Contact B")
+    def test_contact_exists_02(self, mock_exists, mock_get_value):
+        doc = {
+            "email": None,
+            "mobile_no": "0123456789"
+        }
+        mock_exists.return_value = True
+        mock_get_value.return_value = "CONT0002"
 
+        result = contact_exists(doc)
+        self.assertTrue(result)
+        mock_exists.assert_called_once_with(
+            "Contact Phone", 
+            {"phone": doc["mobile_no"]}
+        )
+
+    # Nhiệm vụ: Kiểm tra xử lý khi contact không tồn tại
     @patch("frappe.db.exists")
-    def test_contact_exists_no_match(self, mock_exists):
-        # Kiểm tra khi không tìm thấy contact nào
-        doc = {"email": "none@example.com", "mobile_no": "000000000"}
-        mock_exists.side_effect = [None, None]
+    def test_contact_exists_03(self, mock_exists):
+        doc = {
+            "email": "nonexistent@example.com",
+            "mobile_no": None
+        }
+        mock_exists.return_value = False
+
         result = contact_exists(doc)
         self.assertFalse(result)
+
+class TestCreateContact(unittest.TestCase):
+    def setUp(self):
+        frappe.set_user("Administrator")
+        self.doc_data = {
+            "first_name": "John",
+            "last_name": "Doe",
+            "salutation": "Mr",
+            "organization": "Test Org",
+            "email": "john.doe@example.com",
+            "mobile_no": "0123456789"
+        }
+        self.third = {
+            "first_name": "John",
+            "last_name": "Doe",
+            "salutation": "Mr",
+            "organization": "Test Org",
+            "mobile_no": "0123456789"
+        }
+        self.second = {
+            "first_name": "John",
+            "last_name": "Doe",
+            "salutation": "Mr",
+            "organization": "Test Org",
+            "email": "john.doe@example.com",
+        }
+
+    def tearDown(self):
+        frappe.db.rollback()
+
+    # Nhiệm vụ: Kiểm tra tạo mới contact
+    def test_create_contact_01(self):
+        contact_name = create_contact(self.doc_data)
+        contact = frappe.get_doc("Contact", contact_name)
+        
+        self.assertEqual(contact.first_name, self.doc_data["first_name"])
+        self.assertEqual(contact.last_name, self.doc_data["last_name"])
+        self.assertEqual(contact.salutation, self.doc_data["salutation"])
+        self.assertEqual(contact.company_name, self.doc_data["organization"])
+        
+        self.assertTrue(any(e.email_id == self.doc_data["email"] and e.is_primary == 1 
+                        for e in contact.email_ids))
+        
+        self.assertTrue(any(p.phone == self.doc_data["mobile_no"] and p.is_primary_mobile_no == 1 
+                        for p in contact.phone_nos))
+
+    # Nhiệm vụ: Kiểm tra tìm kiếm contact đã tồn tại
+    @patch("frappe.db.exists")
+    @patch("frappe.db.get_value")
+    def test_create_contact_04(self, mock_get_value, mock_exists):
+        mock_exists.return_value = True
+        mock_get_value.return_value = "CONT0001"
+        
+        result = create_contact(self.doc_data)
+        self.assertEqual(result, "CONT0001")
+        mock_exists.assert_called_once()
+
+    # Nhiệm vụ: Kiểm tra tạo contact có với email
+    def test_create_contact_02(self):
+        contact_name = create_contact(self.second)
+        contact = frappe.get_doc("Contact", contact_name)
+        self.assertTrue(any(e.email_id == self.doc_data["email"] and e.is_primary == 1 
+                        for e in contact.email_ids))
+
+    # Nhiệm vụ: Kiểm tra tạo contact có số điện thoại
+    def test_create_contact_03(self):
+        contact_name = create_contact(self.third)
+        contact = frappe.get_doc("Contact", contact_name)
+        self.assertTrue(any(p.phone == self.doc_data["mobile_no"] and p.is_primary_mobile_no == 1 
+                        for p in contact.phone_nos))
+
+class TestCreateOrganization(unittest.TestCase):
+    def setUp(self):
+        frappe.set_user("Administrator")
+        self.org_data = {
+            "organization_name": "Test Organization",
+            "website": "www.test.com",
+            "industry": "Technology",
+            "annual_revenue": 1000000
+        }
+
+    def tearDown(self):
+        frappe.db.rollback()
+
+    # Nhiệm vụ: Kiểm tra tạo mới organization với đầy đủ thông tin
+    def test_create_organization_01(self):
+        org_name = create_organization(self.org_data)
+        org = frappe.get_doc("CRM Organization", org_name)
+        
+        self.assertEqual(org.organization_name, self.org_data["organization_name"])
+        self.assertEqual(org.website, self.org_data["website"])
+        self.assertEqual(org.territory, self.org_data["territory"])
+        self.assertEqual(org.industry, self.org_data["industry"])
+        self.assertEqual(org.annual_revenue, self.org_data["annual_revenue"])
+
+    # Nhiệm vụ: Kiểm tra xử lý khi không cung cấp organization_name
+    def test_create_organization_03(self):
+        result = create_organization({})
+        self.assertIsNone(result)
+
+    # Nhiệm vụ: Kiểm tra xử lý khi organization đã tồn tại
+    @patch("frappe.db.exists")
+    def test_create_organization_04(self, mock_exists):
+        mock_exists.return_value = "ORG0001"
+        
+        result = create_organization(self.org_data)
+        self.assertEqual(result, "ORG0001")
+        mock_exists.assert_called_once_with(
+            "CRM Organization", 
+            {"organization_name": self.org_data["organization_name"]}
+        )
+
+    # Nhiệm vụ: Kiểm tra tạo organization với tên chứa ký tự đặc biệt
+    def test_create_organization_02(self):
+        special_data = {
+            "organization_name": "Test & Company (Pvt.) Ltd.",
+            "website": "www.test.com",
+            "industry": "Technology",
+            "annual_revenue": 1000000
+        }
+        org_name = create_organization(special_data)
+        org = frappe.get_doc("CRM Organization", org_name)
+        self.assertEqual(org.organization_name, special_data["organization_name"])
+
+class TestAssignAgent(unittest.TestCase):
+
+    def setUp(self):
+        frappe.set_user("Administrator")
+        self.deal = frappe.get_doc({
+            "doctype": "CRM Deal",
+            "deal_name": "DEAL-0001"
+        }).insert(ignore_permissions=True)
+
+    # Nhiệm vụ: Kiểm tra gán agent cho deal khi chưa có assignee nào
+    @patch("crm.fcrm.doctype.crm_deal.crm_deal.assign")
+    def test_assign_agent_01(self, mock_assign):
+        self.deal.get_assigned_users = MagicMock(return_value=[])
+        self.deal.assign_agent("agent1")
+        mock_assign.assert_called_once_with(
+            {"assign_to": ["agent1"], "doctype": "CRM Deal", "name": "DEAL-0001"},
+            ignore_permissions=True
+        )
+
+    # Nhiệm vụ: Kiểm tra không gán lại agent nếu agent đã là assignee
+    @patch("crm.fcrm.doctype.crm_deal.crm_deal.assign")
+    def test_assign_agent_02(self, mock_assign):
+        self.deal.get_assigned_users = MagicMock(return_value=["agent1"])
+        self.deal.assign_agent("agent1")
+        mock_assign.assert_not_called()
+
+    # Nhiệm vụ: Kiểm tra không thực hiện gì nếu agent là None
+    def test_assign_agent_03(self):
+        self.deal.get_assigned_users = MagicMock()
+        self.assertIsNone(self.deal.assign_agent(None))
+
+
+class TestShareWithAgent(unittest.TestCase):
+
+    def setUp(self):
+        frappe.set_user("Administrator")
+        self.deal = frappe.get_doc({
+            "doctype": "CRM Deal",
+            "deal_name": "DEAL-0001"
+        }).insert(ignore_permissions=True)
+
+    # Nhiệm vụ: Kiểm tra phân quyền chia sẻ deal cho agent mới
+    @patch("frappe.share.add_docshare")
+    @patch("frappe.db.exists")
+    @patch("frappe.get_all")
+    @patch("frappe.share.remove")
+    def test_share_with_agent_01(self, mock_remove, mock_get_all, mock_exists, mock_add_docshare):
+        mock_get_all.return_value = [SimpleNamespace(user="old_user")]
+        mock_exists.return_value = False
+        self.deal.share_with_agent("agent1")
+        mock_add_docshare.assert_called_once()
+        mock_remove.assert_called_once_with("CRM Deal", "DEAL-0001", "old_user")
+
+    # Nhiệm vụ: Kiểm tra không chia sẻ lại nếu agent đã được share
+    @patch("frappe.share.add_docshare")
+    @patch("frappe.db.exists")
+    @patch("frappe.get_all")
+    @patch("frappe.share.remove")
+    def test_share_with_agent_02(self, mock_remove, mock_get_all, mock_exists, mock_add_docshare):
+        mock_get_all.return_value = [SimpleNamespace(user="old_user")]
+        mock_exists.return_value = True
+        self.deal.share_with_agent("agent1")
+        mock_add_docshare.assert_not_called()
+        mock_remove.assert_not_called()
+
+    # Nhiệm vụ: Kiểm tra không thực hiện gì nếu agent là None
+    def test_share_with_agent_03(self):
+        self.assertIsNone(self.deal.share_with_agent(None))
+
+class TestSetPrimaryEmailMobileNo(unittest.TestCase):
+    def setUp(self):
+        self.deal = frappe.get_doc({
+            "doctype": "CRM Deal",
+            "deal_name": "Test Deal"
+        }).insert(ignore_permissions=True)
+        self.deal.contacts = []
+
+    # Nhiệm vụ: Kiểm tra khi không có contact nào
+    def test_no_contacts(self):
+        self.deal.set_primary_email_mobile_no()
+        self.assertEqual(self.deal.email, "")
+        self.assertEqual(self.deal.mobile_no, "")
+        self.assertEqual(self.deal.phone, "")
+
+    # Nhiệm vụ: Kiểm tra khi có 1 contact là primary
+    def test_one_primary_contact(self):
+        contact = MagicMock()
+        contact.is_primary = 1
+        contact.email = "a@b.com"
+        contact.mobile_no = "123"
+        contact.phone = "456"
+        self.deal.contacts = [contact]
+        self.deal.set_primary_email_mobile_no()
+        self.assertEqual(self.deal.email, "a@b.com")
+        self.assertEqual(self.deal.mobile_no, "123")
+        self.assertEqual(self.deal.phone, "456")
+
+    # Nhiệm vụ: Kiểm tra khi có nhiều contact, chỉ 1 contact là primary
+    def test_multiple_contacts_one_primary(self):
+        c1 = MagicMock()
+        c1.is_primary = 0
+        c1.email = "x@x.com"
+        c1.mobile_no = "111"
+        c1.phone = "222"
+        c2 = MagicMock()
+        c2.is_primary = 1
+        c2.email = "y@y.com"
+        c2.mobile_no = "333"
+        c2.phone = "444"
+        self.deal.contacts = [c1, c2]
+        self.deal.set_primary_email_mobile_no()
+        self.assertEqual(self.deal.email, "y@y.com")
+        self.assertEqual(self.deal.mobile_no, "333")
+        self.assertEqual(self.deal.phone, "444")
+
+    # Nhiệm vụ: Kiểm tra khi có nhiều hơn 1 contact là primary
+    def test_multiple_primary_contacts(self):
+        c1 = MagicMock()
+        c1.is_primary = 1
+        c1.email = "x@x.com"
+        c1.mobile_no = "111"
+        c1.phone = "222"
+        c2 = MagicMock()
+        c2.is_primary = 1
+        c2.email = "y@y.com"
+        c2.mobile_no = "333"
+        c2.phone = "444"
+        self.deal.contacts = [c1, c2]
+        with self.assertRaises(frappe.ValidationError):
+            self.deal.set_primary_email_mobile_no()
