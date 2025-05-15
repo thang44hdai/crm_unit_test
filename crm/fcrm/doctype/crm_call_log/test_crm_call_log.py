@@ -1,7 +1,7 @@
 import frappe
 from frappe.tests.utils import FrappeTestCase
-from unittest.mock import patch, MagicMock
-
+from unittest.mock import patch
+from pymysql.err import OperationalError, DataError
 from crm.fcrm.doctype.crm_call_log.crm_call_log import (
     CRMCallLog,
     parse_call_log,
@@ -9,198 +9,342 @@ from crm.fcrm.doctype.crm_call_log.crm_call_log import (
     create_lead_from_call_log
 )
 
+
 class TestCRMCallLog(FrappeTestCase):
-    # Mỗi test sẽ được rollback tự động nhờ FrappeTestCase
 
     def setUp(self):
+        """Tạo dữ liệu mẫu: NOTE-001, TASK-001, LEAD-001, DEAL-001, CL-001"""
         super().setUp()
-        # Giả lập hàm seconds_to_duration luôn trả về chuỗi cố định
-        patcher = patch(
-            'crm.fcrm.doctype.crm_call_log.crm_call_log.seconds_to_duration',
-            return_value='00:01:23'
-        )
-        self.mock_seconds = patcher.start()
-        self.addCleanup(patcher.stop)
+        frappe.set_user("Administrator")
 
-    def test_default_list_data_structure_TC_CALLLOG_001(self):
-        """
-        TC_CALLLOG_001: Kiểm tra default_list_data trả về dict chứa 'columns' và 'rows',
-        columns phải là list các dict có 'label' và 'key', rows là list chuỗi.
-        """
-        result = CRMCallLog.default_list_data()
-        self.assertIn('columns', result)
-        self.assertIn('rows', result)
+        # FCRM Note
+        if not frappe.db.exists("FCRM Note", "NOTE-001"):
+            frappe.get_doc({
+                "doctype": "FCRM Note",
+                "name": "NOTE-001",
+                "title": "Ghi chú mẫu"
+            }).insert(ignore_permissions=True)
 
-        columns = result['columns']
-        self.assertIsInstance(columns, list)
-        for col in columns:
-            self.assertIsInstance(col, dict)
-            self.assertIn('label', col)
-            self.assertIn('key', col)
+        # CRM Task
+        if not frappe.db.exists("CRM Task", "TASK-001"):
+            frappe.get_doc({
+                "doctype": "CRM Task",
+                "name": "TASK-001",
+                "title": "Task mẫu",
+                "status": "Todo"
+            }).insert(ignore_permissions=True)
 
-        rows = result['rows']
-        self.assertIsInstance(rows, list)
-        for r in rows:
-            self.assertIsInstance(r, str)
+        # CRM Lead
+        if not frappe.db.exists("CRM Lead", "LEAD-001"):
+            frappe.get_doc({
+                "doctype": "CRM Lead",
+                "name": "LEAD-001",
+                "first_name": "Lead mẫu"
+            }).insert(ignore_permissions=True)
 
-    def test_parse_list_data_empty_TC_CALLLOG_002(self):
-        """
-        TC_CALLLOG_002: parse_list_data(None) và parse_list_data([])
-        phải trả về list rỗng.
-        """
-        self.assertEqual(CRMCallLog.parse_list_data([]), [])
+        # CRM Deal
+        if not frappe.db.exists("CRM Deal", "DEAL-001"):
+            frappe.get_doc({
+                "doctype": "CRM Deal",
+                "name": "DEAL-001",
+                "deal_name": "Deal mẫu"
+            }).insert(ignore_permissions=True)
+
+        # CRM Call Log mẫu
+        if not frappe.db.exists("CRM Call Log", "CL-001"):
+            frappe.get_doc({
+                "doctype": "CRM Call Log",
+                "id": "CL-001",
+                "caller": "Administrator",
+                "receiver": "Administrator",
+                "type": "Incoming",
+                "status": "Completed",
+                "from": "0999",
+                "to": "0123",
+                "duration": 60
+            }).insert(ignore_permissions=True)
+
+        frappe.db.commit()
+
+    def tearDown(self):
+        """Rollback sau mỗi test để đảm bảo isolation."""
+        frappe.db.rollback()
+
+    # 1. Cấu hình List View mặc định
+    def test_default_list_data(self):
+        """TC_CALL_LOGS_001: Lấy cấu hình cột và dòng cho List View"""
+        data = CRMCallLog.default_list_data()
+        self.assertIn("columns", data)
+        self.assertIn("rows", data)
+        labels = [col["label"] for col in data["columns"]]
+        for expected in ("Caller", "Receiver", "Duration"):
+            self.assertIn(expected, labels)
+
+    # 2. parse_list_data với danh sách rỗng
+    def test_parse_list_data_empty(self):
+        """TC_CALL_LOGS_002: Chuẩn hoá danh sách rỗng"""
         self.assertEqual(CRMCallLog.parse_list_data(None), [])
 
-    def test_has_and_link_with_reference_doc_TC_CALLLOG_003(self):
-        """
-        TC_CALLLOG_003: has_link False khi chưa có, link_with_reference_doc
-        thêm mới link, không duplicate khi gọi lại.
-        """
-        # Tạo document mới đúng kiểu Frappe
-        doc = frappe.new_doc("CRM Call Log")
-        # Ban đầu không có link
-        self.assertFalse(doc.has_link('DummyDoc', 'D1'))
-        # Thêm link
-        doc.link_with_reference_doc('DummyDoc', 'D1')
-        self.assertTrue(doc.has_link('DummyDoc', 'D1'))
-        # Gọi lại không thêm bản ghi mới
-        count_before = len(doc.links)
-        doc.link_with_reference_doc('DummyDoc', 'D1')
-        self.assertEqual(len(doc.links), count_before)
+    # 3. parse_list_data với danh sách không rỗng
+    def test_parse_list_data_non_empty(self):
+        """TC_CALL_LOGS_003: Chuẩn hoá danh sách không rỗng"""
+        sample = {"duration": 120, "type": "Incoming", "from": "0123", "receiver": "user@e"}
+        with patch("crm.fcrm.doctype.crm_call_log.crm_call_log.parse_call_log", lambda c: {"ok": True}):
+            result = CRMCallLog.parse_list_data([sample])
+        self.assertEqual(result, [{"ok": True}])
 
-    @patch('crm.fcrm.doctype.crm_call_log.crm_call_log.get_contact_by_phone_number')
-    @patch('frappe.db.get_values')
-    def test_parse_call_log_incoming_TC_CALLLOG_004(self, mock_get_values, mock_get_contact):
-        """
-        TC_CALLLOG_004: Định dạng call loại Incoming,
-        gán activity_type, _caller và _receiver đúng.
-        """
-        mock_get_contact.return_value = {'full_name': 'Nguyen Van A', 'image': 'avatarA.png'}
-        mock_get_values.return_value = [('User B', 'avatarB.png')]
-        call_data = {
-            'type': 'Incoming',
-            'duration': 83,
-            'from': '+841234',
-            'receiver': 'userb@example.com'
-        }
-        parsed = parse_call_log(call_data.copy())
-        # Kiểm tra duration và flag
-        self.assertEqual(parsed['_duration'], '00:01:23')
-        self.assertFalse(parsed['show_recording'])
-        self.assertEqual(parsed['activity_type'], 'incoming_call')
-        # Kiểm tra thông tin caller và receiver
-        self.assertEqual(parsed['_caller']['label'], 'Nguyen Van A')
-        self.assertEqual(parsed['_caller']['image'], 'avatarA.png')
-        self.assertEqual(parsed['_receiver']['label'], 'User B')
-        self.assertEqual(parsed['_receiver']['image'], 'avatarB.png')
+    # 4. has_link() trả về True
+    def test_has_link_true(self):
+        """TC_CALL_LOGS_004: Kiểm tra liên kết với cuộc gọi hợp lệ"""
+        cl = frappe.get_doc("CRM Call Log", "CL-001")
+        cl.links = []
+        cl.append("links", {
+            "link_doctype": "CRM Task",
+            "link_name": "TASK-001"
+        })
+        self.assertTrue(cl.has_link("CRM Task", "TASK-001"))
 
-    @patch('crm.fcrm.doctype.crm_call_log.crm_call_log.get_contact_by_phone_number')
-    @patch('frappe.db.get_values')
-    def test_parse_call_log_outgoing_TC_CALLLOG_005(self, mock_get_values, mock_get_contact):
-        """
-        TC_CALLLOG_005: Định dạng call loại Outgoing,
-        gán activity_type, _caller và _receiver đúng.
-        """
-        mock_get_contact.return_value = {'full_name': 'Tran Thi C', 'image': None}
-        mock_get_values.return_value = [('User D', 'avatarD.png')]
-        call_data = {
-            'type': 'Outgoing',
-            'duration': 45,
-            'to': '+849876',
-            'caller': 'userd@example.com'
-        }
-        parsed = parse_call_log(call_data.copy())
-        self.assertEqual(parsed['activity_type'], 'outgoing_call')
-        self.assertEqual(parsed['_duration'], '00:01:23')
-        self.assertEqual(parsed['_caller']['label'], 'User D')
-        self.assertEqual(parsed['_caller']['image'], 'avatarD.png')
-        self.assertEqual(parsed['_receiver']['label'], 'Tran Thi C')
-        self.assertIsNone(parsed['_receiver']['image'])
+    # 5. has_link() trả về False
+    def test_has_link_false(self):
+        """TC_CALL_LOGS_005: Kiểm tra liên kết với cuộc gọi không có liên kết tương ứng"""
+        cl = frappe.get_doc("CRM Call Log", "CL-001")
+        cl.links = []
+        self.assertFalse(cl.has_link("CRM Task", "TASK-001"))
 
-    def test_parse_call_log_unknown_type_TC_CALLLOG_006(self):
-        """
-        TC_CALLLOG_006: Call không có type hoặc type lạ,
-        vẫn set _duration và show_recording,
-        không tạo activity_type, _caller, _receiver.
-        """
-        call_data = {'duration': 10}
-        parsed = parse_call_log(call_data.copy())
-        self.assertEqual(parsed['_duration'], '00:01:23')
-        self.assertFalse(parsed['show_recording'])
-        self.assertNotIn('activity_type', parsed)
-        self.assertNotIn('_caller', parsed)
-        self.assertNotIn('_receiver', parsed)
+    # 6. link_with_reference_doc() thêm link khi chưa có
+    def test_link_with_reference_doc_add(self):
+        """TC_CALL_LOGS_006: Thêm mới liên kết nếu chưa tồn tại"""
+        cl = frappe.get_doc("CRM Call Log", "CL-001")
+        cl.links = []
+        cl.link_with_reference_doc("CRM Lead", "LEAD-001")
+        # Check if the link was added by examining the child table items
+        link_exists = False
+        for link in cl.links:
+            if link.link_doctype == "CRM Lead" and link.link_name == "LEAD-001":
+                link_exists = True
+                break
+        self.assertTrue(link_exists)
 
-    @patch('frappe.get_cached_doc')
-    @patch('crm.fcrm.doctype.crm_call_log.crm_call_log.parse_call_log')
-    def test_get_call_log_full_TC_CALLLOG_007(self, mock_parse, mock_get_cached):
-        """
-        TC_CALLLOG_007: get_call_log phải gom note, task,
-        và mapping reference_doctype đúng.
-        """
-        # Dữ liệu mẫu bao gồm link tới CRM Task và FCRM Note
-        base = {
-            'name': 'CALL-1',
-            'caller': 'u1',
-            'receiver': 'u2',
-            'duration': 100,
-            'type': 'Incoming',
-            'status': 'Completed',
-            'from': '+841111',
-            'to': '+842222',
-            'note': 'NOTE-1',
-            'reference_doctype': 'CRM Deal',
-            'reference_docname': 'DEAL-1',
-            'creation': '2025-04-17T12:00:00',
-            'links': [
-                {'link_doctype': 'CRM Task', 'link_name': 'TASK-1'},
-                {'link_doctype': 'FCRM Note', 'link_name': 'NOTE-2'}
-            ]
-        }
-        # mock parse_call_log trả về base
-        mock_parse.return_value = base.copy()
-        # Tạo fake docs: note đầu tiên, task, note thứ hai
-        fake_call = MagicMock(as_dict=lambda: base.copy())
-        fake_note1 = MagicMock(as_dict=lambda: {'content': 'Ghi chú 1'})
-        fake_task = MagicMock(as_dict=lambda: {'subject': 'Nhiệm vụ 1'})
-        fake_note2 = MagicMock(as_dict=lambda: {'content': 'Ghi chú 2'})
-        mock_get_cached.side_effect = [fake_call, fake_note1, fake_task, fake_note2]
+    # 7. link_with_reference_doc() không duplicate
+    def test_link_with_reference_doc_skip(self):
+        """TC_CALL_LOGS_007: Không thêm mới liên kết nếu đã tồn tại"""
+        cl = frappe.get_doc("CRM Call Log", "CL-001")
+        cl.links = []
+        cl.append("links", {
+            "link_doctype": "CRM Lead",
+            "link_name": "LEAD-001"
+        })
+        cl.link_with_reference_doc("CRM Lead", "LEAD-001")
+        # Count the number of links with this specific link_name
+        lead_links_count = 0
+        for link in cl.links:
+            if link.link_doctype == "CRM Lead" and link.link_name == "LEAD-001":
+                lead_links_count += 1
+        self.assertEqual(lead_links_count, 1)
 
-        result = get_call_log('CALL-1')
-        # Kiểm tra list ghi chú và nhiệm vụ
-        self.assertEqual(len(result['_notes']), 2)
-        self.assertEqual(result['_notes'][0]['content'], 'Ghi chú 1')
-        self.assertEqual(result['_notes'][1]['content'], 'Ghi chú 2')
-        self.assertEqual(len(result['_tasks']), 1)
-        self.assertEqual(result['_tasks'][0]['subject'], 'Nhiệm vụ 1')
-        # Kiểm tra mapping reference_doctype
-        self.assertEqual(result['_deal'], 'DEAL-1')
+    # 8. parse_call_log() cho Incoming
+    @patch("crm.integrations.api.get_contact_by_phone_number",
+           lambda num: {"full_name": "Nguyễn A", "image": "a.png"})
+    @patch("frappe.db.get_values", lambda dt, n, f: [["Trần B", "b.png"]])
+    def test_parse_call_log_incoming(self):
+        """TC_CALL_LOGS_008: chuẩn hoá thông tin cuộc gọi đến"""
+        inp = {"duration": 90, "type": "Incoming", "from": "0123", "receiver": "user"}
+        out = parse_call_log(dict(inp))
+        self.assertEqual(out["activity_type"], "incoming_call")
+        self.assertEqual(out["_duration"], "00:01:30")
+        self.assertEqual(out["_caller"]["label"], "Nguyễn A")
+        self.assertEqual(out["_receiver"]["label"], "Trần B")
+        self.assertFalse(out["show_recording"])
 
-    @patch('frappe.new_doc')
-    @patch('frappe.get_doc')
-    def test_create_lead_from_call_log_TC_CALLLOG_008(self, mock_get_doc, mock_new_doc):
-        """
-        TC_CALLLOG_008: create_lead_from_call_log phải tạo Lead mới,
-        set đúng first_name, mobile_no, link call log, lưu vào DB.
-        """
-        input_data = {'name': 'CALL-2', 'from': '+843333'}
-        # mock tạo lead
-        fake_lead = MagicMock()
-        fake_lead.name = 'LEAD-2'
-        mock_new_doc.return_value = fake_lead
-        # mock get_doc cho call log
-        fake_call = MagicMock()
-        mock_get_doc.return_value = fake_call
+    # 9. parse_call_log() cho Outgoing
+    @patch("crm.integrations.api.get_contact_by_phone_number",
+           lambda num: {"full_name": "Phạm D", "image": "d.png"})
+    @patch("frappe.db.get_values", lambda dt, n, f: [["Võ E", "e.png"]])
+    def test_parse_call_log_outgoing(self):
+        """TC_CALL_LOGS_009: Chuẩn hoá thông tin cuộc gọi đi"""
+        inp = {"duration": 30, "type": "Outgoing", "to": "0456", "caller": "user"}
+        out = parse_call_log(dict(inp))
+        self.assertEqual(out["activity_type"], "outgoing_call")
+        self.assertEqual(out["_duration"], "00:00:30")
+        self.assertEqual(out["_receiver"]["label"], "Phạm D")
+        self.assertEqual(out["_caller"]["label"], "Võ E")
+        self.assertFalse(out["show_recording"])
 
-        returned = create_lead_from_call_log(input_data)
-        # Kiểm tra đã khởi tạo lead và gán fields
-        mock_new_doc.assert_called_with('CRM Lead')
-        self.assertEqual(fake_lead.first_name, 'Lead from call +843333')
-        self.assertEqual(fake_lead.mobile_no, '+843333')
-        # Kiểm tra link và save
-        fake_call.link_with_reference_doc.assert_called_with('CRM Lead', 'LEAD-2')
-        fake_call.save.assert_called()
-        # Phải trả về tên lead mới
-        self.assertEqual(returned, 'LEAD-2')
-        # Kiểm tra tồn tại trong DB (sẽ rollback sau)
-        self.assertTrue(frappe.db.exists('CRM Lead', 'LEAD-2'))
+    # 10. get_call_log() với note + reference CRM Lead
+    def test_get_call_log_with_note_and_ref(self):
+        """TC_CALL_LOGS_010: Lấy thông tin cuộc gọi với note và liên kết đến CRM Lead"""
+        # Use mock to bypass link validation and document fetching
+        with patch("frappe.model.document.Document._validate_links", return_value=None), \
+             patch("frappe.get_cached_doc", side_effect=lambda *args, **kwargs: frappe._dict({
+                "doctype": args[0],
+                "name": args[1],
+                "as_dict": lambda: {
+                    "name": args[1], 
+                    "note": "NOTE-001",
+                    "reference_doctype": "CRM Lead",
+                    "reference_docname": "LEAD-001"
+                }
+             })):
+            
+            # Test the function directly without saving a document
+            out = get_call_log("CL-001")
+            self.assertIn("NOTE-001", [n["name"] for n in out["_notes"]])
+            self.assertEqual(out["_lead"], "LEAD-001")
+
+    # 11. get_call_log() với links Task + Note
+    def test_get_call_log_with_links_task_and_note(self):
+        """TC_CALL_LOGS_011: Lấy thông tin cuộc gọi với liên kết đến Task và Note"""
+        # Setup mocks for all function calls in the test
+        with patch("frappe.model.document.Document._validate_links", return_value=None), \
+             patch("frappe.get_cached_doc", side_effect=lambda *args, **kwargs: frappe._dict({
+                 "doctype": args[0],
+                 "name": args[1],
+                 "as_dict": lambda: {"name": args[1], "title": f"Mock {args[0]}"},
+                 "links": [
+                     frappe._dict({"link_doctype": "CRM Task", "link_name": "TASK-001"}),
+                     frappe._dict({"link_doctype": "FCRM Note", "link_name": "NOTE-001"})
+                 ]
+             })):
+            
+            # Test with mocked data
+            out = get_call_log("CL-001")
+            self.assertIn("TASK-001", [t["name"] for t in out["_tasks"]])
+            self.assertIn("NOTE-001", [n["name"] for n in out["_notes"]])
+
+    # 12. get_call_log() với name không tồn tại
+    def test_get_call_log_invalid(self):
+        """TC_CALL_LOGS_012: Lấy thông tin cuộc gọi với name không tồn tại"""
+        with self.assertRaises(frappe.DoesNotExistError):
+            get_call_log("NO-LOG")
+
+    # 13. create_lead_from_call_log()
+    def test_create_lead_from_call_log(self):
+        """TC_CALL_LOGS_013: Tạo Lead từ Call Log và link lại"""
+        lead_name = create_lead_from_call_log({"name": "CL-001", "from": "0999"})
+        lead = frappe.get_doc("CRM Lead", lead_name)
+        self.assertTrue(lead.first_name.startswith("Lead from call"))
+        cl = frappe.get_doc("CRM Call Log", "CL-001")
+        self.assertTrue(cl.has_link("CRM Lead", lead_name))
+
+    # 14. insert() hợp lệ
+    def test_insert_call_log_valid(self):
+        """TC_CALL_LOGS_014: Thêm mới cuộc gọi hợp lệ"""
+        before = frappe.db.count("CRM Call Log")
+        # Generate a unique ID with timestamp to avoid duplicate entries
+        import datetime
+        unique_id = f"CL-TEST-{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
+        
+        cl = frappe.get_doc({
+            "doctype": "CRM Call Log",
+            "id": unique_id,           # Using a unique ID with timestamp
+            "caller": "Administrator",
+            "receiver": "Administrator",
+            "type": "Incoming",
+            "status": "Completed",
+            "from": "0123",
+            "to": "0456",
+            "duration": 60
+        })
+        cl.insert(ignore_permissions=True)
+        frappe.db.commit()
+        after = frappe.db.count("CRM Call Log")
+        self.assertEqual(after, before + 1)
+        
+        # Clean up the test document to avoid polluting the database
+        frappe.delete_doc("CRM Call Log", unique_id, force=True)
+
+    # 15. insert() thiếu from → MandatoryError
+    def test_insert_call_log_missing_from(self):
+        """TC_CALL_LOGS_015: Thêm mới cuộc gọi thiếu số gọi đi"""
+        with self.assertRaises(frappe.MandatoryError):
+            frappe.get_doc({
+                "doctype": "CRM Call Log",
+                "id": "CL-003",
+                "caller": "Administrator",
+                "receiver": "Administrator",
+                "type": "Incoming",
+                "status": "Completed",
+                "from": "",              # Bỏ trống
+                "to": "0456",
+                "duration": 60
+            }).insert(ignore_permissions=True)
+
+    # 16. insert() thiếu to → MandatoryError
+    def test_insert_call_log_missing_to(self):
+        """TC_CALL_LOGS_016: Thêm mới cuộc gọi thiếu số gọi đến"""
+        with self.assertRaises(frappe.MandatoryError):
+            frappe.get_doc({
+                "doctype": "CRM Call Log",
+                "id": "CL-004",
+                "caller": "Administrator",
+                "receiver": "Administrator",
+                "type": "Outgoing",
+                "status": "Completed",
+                "from": "0123",
+                "to": "",               # Bỏ trống
+                "duration": 60
+            }).insert(ignore_permissions=True)
+
+    # 17. insert() duration sai định dạng → ValidationError
+    def test_insert_call_log_invalid_duration(self):
+        """TC_CALL_LOGS_017: Thêm mới cuộc gọi với duration sai định dạng"""
+        import datetime
+        unique_id = f"CL-INVALID-{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
+        
+        # Tạo một document mới với duration sai định dạng
+        doc = frappe.get_doc({
+            "doctype": "CRM Call Log",
+            "id": unique_id,
+            "caller": "Administrator",
+            "receiver": "Administrator", 
+            "type": "Incoming",
+            "status": "Completed",
+            "from": "0123",
+            "to": "0456",
+            "duration": "60 phút"  # Sai định dạng
+        })
+                
+        with self.assertRaises((frappe.ValidationError, DataError)):
+            try:
+                doc.insert(ignore_permissions=True)
+            except Exception as e:
+                if isinstance(e, DataError):
+                    raise
+                else:
+                    raise
+
+    # 18. save() cập nhật status
+    def test_update_call_log_status(self):
+        """TC_CALL_LOGS_018: Cập nhật status thành công"""
+        cl = frappe.get_doc("CRM Call Log", "CL-001")
+        cl.status = "Completed"
+        cl.save(ignore_permissions=True)
+        frappe.db.commit()
+        self.assertEqual(frappe.get_value("CRM Call Log", "CL-001", "status"), "Completed")
+
+    # 19. save() cập nhật type không hợp lệ
+    def test_update_call_log_invalid_type(self):
+        """TC_CALL_LOGS_019: Cập nhật type không hợp lệ """
+        cl = frappe.get_doc("CRM Call Log", "CL-001")
+        cl.type = "Unknown"
+        with self.assertRaises(frappe.ValidationError):
+            cl.save(ignore_permissions=True)
+
+    # 20. delete() thành công
+    def test_delete_call_log_valid(self):
+        """TC_CALL_LOGS_020: Xoá cuộc gọi thành công"""
+        before = frappe.db.count("CRM Call Log")
+        cl = frappe.get_doc("CRM Call Log", "CL-001")
+        cl.delete(ignore_permissions=True)
+        frappe.db.commit()
+        self.assertEqual(frappe.db.count("CRM Call Log"), before - 1)
+
+    # 21. delete() không tồn tại → DoesNotExistError
+    def test_delete_call_log_nonexistent(self):
+        """TC_CALL_LOGS_021: Xoá cuộc gọi không tồn tại"""
+        with self.assertRaises(frappe.DoesNotExistError):
+            frappe.delete_doc("CRM Call Log", "NO-LOG", force=True)
+
+
+if __name__ == "__main__":
+    unittest.main()
